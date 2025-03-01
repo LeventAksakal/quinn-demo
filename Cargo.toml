@@ -1,0 +1,19 @@
+[package]
+name = "quinn-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quinn = "0.11.6"
+rcgen = "0.13.2"
+rustls = "0.23.23"
+rustls-pemfile = "2.2.0"
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
