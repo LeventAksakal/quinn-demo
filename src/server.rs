@@ -1,76 +1,167 @@
-use quinn::{Endpoint, ServerConfig, TransportConfig};
-use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::{
     error::Error,
+    fs::File,
+    io::BufReader,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
+
+use quinn::{Endpoint, ServerConfig, TransportConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
 const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5001);
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // Configure the server
-    let server_config = configure_server()?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    println!("Starting QUIC server...");
 
-    // Start the server (asynchronously)
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(async { server(server_config).await })
-}
+    // Setup the server endpoint
+    let endpoint = match setup_server_endpoint() {
+        Ok(endpoint) => {
+            println!("Server listening on {}", SERVER_ADDR);
+            endpoint
+        }
+        Err(e) => {
+            eprintln!("Failed to setup server: {}", e);
+            return Err(e);
+        }
+    };
 
-async fn server(config: ServerConfig) -> Result<(), Box<dyn Error>> {
-    // Bind this endpoint to a UDP socket on the given server address.
-    let endpoint = Endpoint::server(config, SERVER_ADDR)?;
-    println!("Server listening on {}", SERVER_ADDR);
-
-    // Start iterating over incoming connections.
-    while let Some(conn) = endpoint.accept().await {
-        let connection = conn.await?;
-        println!("Connection received from {}", connection.remote_address());
-
-        // Handle the connection in a new task
-        tokio::spawn(async move { handle_connection(connection).await });
+    // Run the server
+    if let Err(e) = server_loop(endpoint).await {
+        eprintln!("Server error: {}", e);
+        return Err(e);
     }
 
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Connection) {
-    // Basic handler that accepts a bidirectional stream
-    if let Ok((mut send, mut recv)) = conn.accept_bi().await {
-        println!("Stream established with {}", conn.remote_address());
-
-        // Echo any data received
-        let mut buf = vec![0; 1024];
-        while let Ok(Some(n)) = recv.read(&mut buf).await {
-            if n == 0 {
-                break;
-            }
-
-            println!("Received {} bytes", n);
-            if let Err(e) = send.write_all(&buf[..n]).await {
-                println!("Write failed: {}", e);
-                break;
-            }
+fn setup_server_endpoint() -> Result<Endpoint, Box<dyn Error>> {
+    // Try to load cert and key from files
+    let (cert_chain, priv_key) = match load_certificates_from_pem() {
+        Ok((cert, key)) => (cert, key),
+        Err(e) => {
+            eprintln!("Failed to load certificates: {}", e);
+            return Err(e);
         }
+    };
 
-        println!("Stream closed");
-    }
-}
-
-fn configure_server() -> Result<ServerConfig, Box<dyn Error>> {
-    // Parse the certificate and key
-    let certs: Vec<CertificateDer> =
-        CertificateDer::pem_file_iter("cert.pem")?.collect::<Result<_, _>>()?;
-    let key = PrivateKeyDer::from_pem_file("key.pem")?;
-
-    // Create server config
-    let mut server_config = ServerConfig::with_single_cert(certs, key)?;
+    // Create server config with the certificate
+    let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key)?;
 
     // Configure transport parameters
-    let mut transport_config = TransportConfig::default();
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?));
-    server_config.transport_config(Arc::new(transport_config));
+    let transport_config = {
+        let mut config = TransportConfig::default();
+        config.max_concurrent_uni_streams(0_u8.into());
+        config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+        config
+    };
 
-    Ok(server_config)
+    // Apply transport configuration
+    *Arc::get_mut(&mut server_config.transport).unwrap() = transport_config;
+
+    // Create and bind the endpoint
+    let endpoint = Endpoint::server(server_config, SERVER_ADDR)?;
+
+    Ok(endpoint)
+}
+
+fn load_certificates_from_pem(
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Box<dyn Error>> {
+    // Load certificate
+    let cert_file = File::open("cert.pem")?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+    let cert_chain = certs
+        .into_iter()
+        .map(CertificateDer::from)
+        .collect::<Vec<_>>();
+
+    if cert_chain.is_empty() {
+        return Err("No certificates found in cert.pem".into());
+    }
+
+    // Load private key
+    let key_file = File::open("key.pem")?;
+    let mut key_reader = BufReader::new(key_file);
+    let key = match rustls_pemfile::private_key(&mut key_reader)? {
+        Some(key) => PrivateKeyDer::from(key),
+        None => return Err("No private key found in key.pem".into()),
+    };
+
+    Ok((cert_chain, key))
+}
+
+async fn server_loop(endpoint: Endpoint) -> Result<(), Box<dyn Error>> {
+    println!("Waiting for incoming connections...");
+
+    // Start iterating over incoming connections
+    while let Some(conn) = endpoint.accept().await {
+        match conn.await {
+            Ok(connection) => {
+                println!("Connection received from {}", connection.remote_address());
+
+                // Handle the connection in a new task
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(connection).await {
+                        eprintln!("Connection handling error: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("Connection error: {}", e);
+                // Continue to accept other connections even if one fails
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_connection(conn: quinn::Connection) -> Result<(), Box<dyn Error>> {
+    println!("Handling connection from {}", conn.remote_address());
+
+    // Loop to accept multiple bidirectional streams
+    while let Ok(stream) = conn.accept_bi().await {
+        println!("Accepted new bidirectional stream");
+
+        // Spawn a new task to handle each stream concurrently
+        tokio::spawn(async move {
+            if let Err(e) = handle_stream(stream).await {
+                eprintln!("Stream handling error: {}", e);
+            }
+        });
+    }
+
+    println!("Connection closed by client: {}", conn.remote_address());
+    Ok(())
+}
+
+async fn handle_stream(
+    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+) -> Result<(), Box<dyn Error>> {
+    // Echo any data received
+    let mut buf = vec![0; 1024];
+    while let Ok(Some(n)) = recv.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+
+        println!(
+            "Received {} bytes: {}",
+            n,
+            String::from_utf8_lossy(&buf[..n])
+        );
+
+        match send.write_all(&buf[..n]).await {
+            Ok(_) => println!("Echoed {} bytes back to client", n),
+            Err(e) => {
+                eprintln!("Write failed: {}", e);
+                return Err(e.into());
+            }
+        }
+    }
+
+    println!("Stream closed");
+    Ok(())
 }
