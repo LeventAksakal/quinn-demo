@@ -9,12 +9,40 @@ use std::{
 };
 
 pub const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5001);
+/// Client for QUIC connection
+///
+/// This struct provides methods for establishing and managing QUIC connections
+/// to a server using the Quinn library.
+///
+/// ### Fields
+///
+/// * `server_addr` - Socket address for the server
+///
+/// ### Example
+///
+/// ```
+/// let server = Server::new();
+/// let endpoint = servere.setup_client_endpoint()?;
+/// let connection = server.connect_to_server(&endpoint).await?;
+/// Server::handle_client_session(connection).await?;
+/// ```
 pub struct Server {
+    #[allow(unused)]
     server_addr: SocketAddr,
 }
 impl Server {
+    ///  Setup a server endpoint with default certificates and default configurations
+    ///
+    /// ### Arguments
+    ///
+    /// -
+    ///
+    /// ### Returns
+    ///
+    /// A `Result` containing:
+    /// * `Ok(Endpoint)` - A successful quinn endpoint
+    /// * `Err(Box<dyn Error>)` - An error if the anything fails
     pub fn setup_server_endpoint() -> Result<Endpoint, Box<dyn Error>> {
-        // Try to load cert and key from files
         let (cert_chain, priv_key) = match Self::load_certificates_from_pem() {
             Ok((cert, key)) => (cert, key),
             Err(e) => {
@@ -23,10 +51,8 @@ impl Server {
             }
         };
 
-        // Create server config with the certificate
         let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key)?;
 
-        // Configure transport parameters
         let transport_config = {
             let mut config = TransportConfig::default();
             config.max_concurrent_uni_streams(0_u8.into());
@@ -34,18 +60,16 @@ impl Server {
             config
         };
 
-        // Apply transport configuration
         *Arc::get_mut(&mut server_config.transport).unwrap() = transport_config;
 
-        // Create and bind the endpoint
         let endpoint = Endpoint::server(server_config, SERVER_ADDR)?;
 
         Ok(endpoint)
     }
 
-    pub fn load_certificates_from_pem(
+    /// Helper function to read .pem certificates into Der format
+    fn load_certificates_from_pem(
     ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Box<dyn Error>> {
-        // Load certificate
         let cert_file = File::open("cert.pem")?;
         let mut cert_reader = BufReader::new(cert_file);
         let certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
@@ -58,7 +82,6 @@ impl Server {
             return Err("No certificates found in cert.pem".into());
         }
 
-        // Load private key
         let key_file = File::open("key.pem")?;
         let mut key_reader = BufReader::new(key_file);
         let key = match rustls_pemfile::private_key(&mut key_reader)? {
@@ -69,6 +92,16 @@ impl Server {
         Ok((cert_chain, key))
     }
 
+    /// Basic server loop.
+    /// Iterates over incoming connections and spawns a connection handler for each one.
+    ///
+    /// ### Arguments
+    ///
+    /// `endpoint` : Quinn endpoint for the server
+    ///
+    /// ### Returns
+    ///
+    /// - Ok(()) or Err(e)
     pub async fn server_loop(endpoint: Endpoint) -> Result<(), Box<dyn Error>> {
         println!("Waiting for incoming connections...");
 
@@ -95,14 +128,13 @@ impl Server {
         Ok(())
     }
 
+    /// Connection handler for quinn connections.
+    /// Spawns a stream handler for each bi-directional stream coming from client.
     pub async fn handle_connection(conn: quinn::Connection) -> Result<(), Box<dyn Error>> {
         println!("Handling connection from {}", conn.remote_address());
 
-        // Loop to accept multiple bidirectional streams
         while let Ok(stream) = conn.accept_bi().await {
             println!("Accepted new bidirectional stream");
-
-            // Spawn a new task to handle each stream concurrently
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_stream(stream).await {
                     eprintln!("Stream handling error: {}", e);
@@ -114,6 +146,7 @@ impl Server {
         Ok(())
     }
 
+    /// Basic stream handler. Relays anything received back to client.
     pub async fn handle_stream(
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
     ) -> Result<(), Box<dyn Error>> {

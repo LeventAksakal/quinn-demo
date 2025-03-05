@@ -45,49 +45,12 @@ pub async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         None => run_demo().await,
 
         Some(Command::Server { addr }) => {
-            let server_addr = addr.unwrap_or(crate::server::SERVER_ADDR);
-
-            println!("Starting server on {}...", server_addr);
-
-            // Setup the server endpoint with custom address if provided
-            let endpoint = if server_addr == crate::server::SERVER_ADDR {
-                crate::server::Server::setup_server_endpoint()?
-            } else {
-                // If you want to support custom addresses, you'd need to modify
-                // Server::setup_server_endpoint to accept an address parameter
-                // This is a placeholder for that functionality
-                return Err("Custom server address not yet supported".into());
-            };
-
-            // Run the server loop
-            crate::server::Server::server_loop(endpoint).await?;
-
+            run_server(addr).await?;
             Ok(())
         }
 
         Some(Command::Client { addr, server_name }) => {
-            let server_addr = addr.unwrap_or(crate::client::SERVER_ADDR);
-            let server_name = server_name.unwrap_or_else(|| crate::client::SERVER_NAME.to_string());
-
-            println!("Connecting to {} ({})...", server_addr, server_name);
-
-            // Set up client endpoint with certificate configuration
-            let endpoint = crate::client::Client::setup_client_endpoint()?;
-
-            // Connect and establish a session
-            // You'd need to modify connect_to_server to accept custom server_addr and server_name
-            let connection = if server_addr == crate::client::SERVER_ADDR
-                && server_name == crate::client::SERVER_NAME
-            {
-                crate::client::Client::connect_to_server(&endpoint).await?
-            } else {
-                // This is a placeholder for the functionality
-                return Err("Custom client connection parameters not yet supported".into());
-            };
-
-            // Handle the client session
-            crate::client::Client::handle_client_session(connection).await?;
-
+            run_client(addr, server_name).await?;
             Ok(())
         }
 
@@ -112,7 +75,7 @@ async fn run_demo() -> Result<(), Box<dyn Error>> {
     };
 
     // Spawn the server in a separate task
-    let server_handle = tokio::spawn(async move {
+    let _server_handle = tokio::spawn(async move {
         println!("Server task started");
         if let Err(e) = crate::server::Server::server_loop(endpoint).await {
             eprintln!("Server error: {}", e);
@@ -136,5 +99,51 @@ async fn run_demo() -> Result<(), Box<dyn Error>> {
         return Err(e);
     }
 
+    Ok(())
+}
+async fn run_server(addr: Option<SocketAddr>) -> Result<(), Box<dyn Error>> {
+    let server_addr = addr.unwrap_or(crate::server::SERVER_ADDR);
+
+    println!("Starting server on {}...", server_addr);
+
+    // Setup the server endpoint with custom address if provided
+    let endpoint = if server_addr == crate::server::SERVER_ADDR {
+        crate::server::Server::setup_server_endpoint()?
+    } else {
+        // If you want to support custom addresses, you'd need to modify
+        // Server::setup_server_endpoint to accept an address parameter
+        // This is a placeholder for that functionality
+        return Err("Custom server address not yet supported".into());
+    };
+
+    // Run the server loop
+    crate::server::Server::server_loop(endpoint).await?;
+
+    Ok(())
+}
+async fn run_client(
+    addr: Option<SocketAddr>,
+    server_name: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let server_addr = addr.unwrap_or(crate::client::SERVER_ADDR);
+    let server_name = server_name.unwrap_or_else(|| crate::client::SERVER_NAME.to_string());
+
+    println!("Connecting to {} ({})...", server_addr, server_name);
+
+    // Set up client endpoint with certificate configuration
+    let endpoint = crate::client::Client::setup_client_endpoint()?;
+
+    // Connect and establish a session
+    // You'd need to modify connect_to_server to accept custom server_addr and server_name
+    let connection =
+        if server_addr == crate::client::SERVER_ADDR && server_name == crate::client::SERVER_NAME {
+            crate::client::Client::connect_to_server(&endpoint).await?
+        } else {
+            // This is a placeholder for the functionality
+            return Err("Custom client connection parameters not yet supported".into());
+        };
+
+    // Handle the client session
+    crate::client::Client::handle_client_session(connection).await?;
     Ok(())
 }
